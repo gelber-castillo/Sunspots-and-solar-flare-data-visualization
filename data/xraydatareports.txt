@@ -1,0 +1,535 @@
+;
+;**************************************************************************************************
+;
+;Program: XrayDataReports
+;
+;Routine to convert monthly GOES X-ray data listings into standard format
+;
+;Written by Bill Denig
+;
+;Version History
+;  18 Feb 13 - Initial development
+;  20 Feb 13 - IOC
+;  05 May 13 - Corrected output file specification (Thanks: Ricky Egeland)
+;  30 Dec 13 - Correlate with flare locations from h-alpha listings (Thanks: Alysha Reinard)
+;
+;Notes: TBD
+;
+;**************************************************************************************************
+;
+Pro XrayDataReports
+;
+;Input Record Specification:
+;
+;   --------------------------------------------------------------------
+;   COLUMNS   FMT   DESCRIPTION
+;   --------------------------------------------------------------------
+;    1- 2     I2    Year (yy)
+;    3- 4     I2    Month (mm)
+;    5- 6     I2    Day (dd)
+;    7- 9     A3    Three letter station identifier (sss)
+;                     "Gxx" = GOES Satellite Designator; "G15" = GOES 15
+;   10-13     I4    Start time (hhmm)
+;   14-17     I4    Maximim time (hhmm)
+;   18-21     I4    End time (hhmm)
+;   22-28   E7.1    Background ?
+;   29-35   E7.1    Peak
+;   36-42   E7.1    Integrated Energy
+;   --------------------------------------------------------------------
+;
+;Output File Specification
+;   Column  Format  Description   
+;
+;    1- 2     I2    Data code: always 31 for x-ray events
+;    3- 5     I3    Station Code, 777 for GOES
+;    6- 7     I2    Year
+;    8- 9     I2    Month
+;   10-11     I2    Day
+;   12-13     A2    Astrisks mark record with unconfirmed change (What does this mean?)
+;   14-17     I4    Start time of x-ray event - SEE NOTE 1
+;   18        1X    <space>
+;   19-22     I4    End time
+;   23        1X    <space>
+;   24-27     I4    Max time
+;   28        1X    <space>
+;   29        A1    N or S for north or south latitude of xray flare if known
+;   30-31     I2    Latitude of xray flare, if known
+;   32        A1    E or W for east or west of longitude of xray flare, in known
+;   33-34     I2    Central meridian distance of x-ray flare, if known
+;   35-37     A3    SXI if data are from SXI imagery, blank otherwise
+;   38-59    22X    <space>
+;   60        A1    X-ray class: C,M,X code - SEE NOTE 2
+;   61        1X    <space>
+;   62-63     I2    X-ray intensity 10-99 for 1.0-9.9 x xray class
+;   64-67     4X    <space>
+;   68-71     A4    Station ame abbreviation - "Gxx " for GOES
+;   72        1X    <space>
+;   73-80   E7.1    Integrated flux (units = J/m**2)
+;   81-85     I5    NOAA/USAF sunspot region number
+;   86        1X    <space>
+;   87-88     I2    Year - central meridian passage (CMP)
+;   89-90     I2    Month - central meridian passage (CMP)
+;   91-94   F4.1    Day - central meridian passage (CMP)
+;   95        1X    <space>
+;   96-102  F7.1    Total region area in squared arc seconds
+;  103        1X    <space>
+;  104-110  F7.2    Total intensity (units - TBD) from SXI, if available
+;  ---------------------------------------------------------------------
+;  Note 1: Prior to 1997 if x-ray event could be corrolated to an optical
+;  event, then the time of the optical event was used.
+;  Note 2: X-ray class are classified according to the order of magnitude
+;  of the peak burst intensity (I) within the 0.1 - 0.8 nm band. The
+;  following apply:
+;  Class  +------Watt/m**2-----+
+;    B               I  <  10E-6         
+;    C    10E-6  <=  I  <  10E-5
+;    M    10E-5  <=  I  <  10E-4
+;    X               I  >  10E-4           
+;
+;------------------------------------------------------------------------
+;
+;
+validRecordCounter  = 0
+rejectRecordCounter = 0
+;
+;Get filename and open file
+;
+openFile$:
+inputFileName = ''
+On_IOerror,openFileError$
+If !version.OS_Name EQ 'Microsoft Windows' Then Begin
+  dataDirectory='C:\bdlatitude\Denig - Science\dmsp_sw\ngdc_sw\XrayDataReports\'
+  inputFileName = dialog_PickFile(title='Request Input FileName',    $
+    path=dataDirectory,filter = '*.txt',/read,                       $                                                  
+    get_Path = dataDirectory)
+EndIf Else Begin
+  Read,Prompt=' Enter input filename (<CR> to end): ',inputFileName
+EndElse  
+If strLen(inputFileName) EQ 0 Then goTo, endJob$
+Print,' Input File: ',inputFileName
+Get_LUN,u_dpd
+Openr,u_dpd,inputFileName
+goTo,readFile$
+;
+;Error handler (open)
+;
+openFileError$:
+On_IOerror,null
+Free_LUN,u_dpd
+Print,' ***** File not found - Try again *****'
+goTo,openFile$
+;
+readFile$:
+lineIn = ''
+On_IOerror,fileError$
+Readf,u_dpd,lineIn
+Print,' Header:   ',lineIn
+;
+;Open outFile
+;
+printFile$:
+printFileName = ''
+On_IOerror,printFileError$
+If !version.OS_Name EQ 'Microsoft Windows' Then Begin
+  printFileName=dialog_PickFile(title=' Request Print FileName',     $
+    path=dataDirectory,/OverWrite_Prompt,/Write)
+EndIf Else Begin  
+  Read,Prompt=' Enter print filename (<CR> to end): ',printFileName
+EndElse  
+If strLen(printFileName) EQ 0 Then goTo, endJob$
+Print,' Print File: ',printFileName
+If !version.OS_Name NE 'Microsoft Windows' Then Begin
+  If File_Test(printFileName) Then Begin
+    charAnswer=''
+    Read,Prompt=' *****Overwrite existing output file? Y/N (<CR> to end): ',charAnswer
+    If StrLen(charAnswer) EQ 0 Then goTo,endJob$
+    charAnswerStrip=StrMid(charAnswer,0,1)
+    If charAnswerStrip EQ 'n' OR  charAnswerStrip EQ 'N' Then goTo,printFile$
+    If charAnswerStrip NE 'y' AND charAnswerStrip NE 'Y' Then Begin
+      Print,' ***** Answer not understood - return to output file request'
+      goTo,printFile$
+    EndIf
+  EndIf
+EndIf
+;
+Get_LUN,u_out
+Openw,u_out,printFileName
+goTo,processFile$
+;
+printFileError$:
+On_IOerror,null
+Free_LUN,u_out
+Print,' ***** Error - terminating *****'
+;
+processFile$:
+While ~ EOF(u_dpd) Do Begin
+;  Print,''                                       ;Blank line
+  Readf,u_dpd,lineIn
+  Print,''
+  If strLen(lineIn) GE 42 Then Begin
+    Print,'Accepted: ',lineIn
+  EndIf Else Begin
+    Print,'Rejected: ',lineIn
+    rejectRecordCounter = rejectRecordCounter + 1
+    goTo,NextRecord$
+  EndElse
+;
+;Process Record
+;
+;Catch,theError
+;
+;                   1         2         3         4         5         6         7         8         9        10        11   
+  lineOut='12345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890'
+  lineOut='zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'
+;
+  x01 = strMid(lineIn, 0, 2)                       ;year  (yy)
+  x02 = strMid(lineIn, 2, 2)                       ;month (mm)
+  x03 = strMid(lineIn, 4, 2)                       ;day   (dd
+  x04 = strMid(lineIn, 6, 3)                       ;station name
+  x05 = strMid(lineIn, 9, 2)                       ;start hour   (hh)
+  x06 = strMid(lineIn,11, 2)                       ;start minute (mm)
+  x07 = strMid(lineIn,13, 2)                       ;maximum hour   (hh)
+  x08 = strMid(lineIn,15, 2)                       ;maximum minute (mm)
+  x09 = strMid(lineIn,17, 2)                       ;end hour   (hh)
+  x10 = strMid(lineIn,19, 2)                       ;end minute (mm)
+  x11 = strMid(lineIn,21, 7)                       ;background      (F7.1)
+  x12 = strMid(lineIn,28, 7)                       ;peak intensity  (F7.1)
+  x13 = strMid(lineIn,35, 7)                       ;integrated flux (F7.1) 
+;  
+  iYear       = Fix(x01)
+  iYear       = iYear + 2000
+  iMonth      = Fix(x02)
+  iDay        = Fix(x03)
+  stationName = x04
+  strthh      = Fix(x05)
+  strtmm      = Fix(x06)
+  peakhh      = Fix(x07)
+  peakmm      = Fix(x08)
+  stophh      = Fix(x09)
+  stopmm      = Fix(x10)
+  xRayBkgnd   = Float(x11)
+  xRayFlare   = Float(x12)
+  totalFlux   = Float(x13)
+;  
+;Calculate x-ray classification
+;
+setClass$:
+  xRayClass= '#'                                     ;Set default variable
+  If xRayFlare LT 1.E-6 Then Begin
+    xRayClass  = 'B'
+    xIntensity= xRayFlare/1.E-7
+  EndIf  
+  If(xRayFlare GE 1.E-6 AND xRayFlare LT 1.E-5) Then Begin
+    xRayClass  = 'C'
+    xIntensity = xRayFlare/1.E-6
+  EndIf  
+  If(xRayFlare GE 1.E-5 AND xRayFlare LT 1.E-4) Then Begin
+    xRayClass  = 'M
+    xIntensity = xRayFlare/1.E-5
+  EndIf  
+  If xRayFlare GE 1.E-4 Then Begin
+    xRayClass = 'X'
+    xIntensity = xRayFlare/1.E-4
+    If xIntensity GT 9.9 Then Begin
+      charAnswer=''
+      Read,Prompt=' Measured flare exceeds X99. Skip? Y/N (<CR> to end):',charAnswer
+      If strLen(charAnswer) EQ 0 Then goTo, endJob$
+      charAnswerStrip=StrMid(charAnswer,0,1)
+      If charAnswerStrip EQ 'y' OR  charAnswerStrip EQ 'Y' Then goTo,nextRecord$
+      If charAnswerStrip NE 'n' AND charAnswerStrip EQ 'N' Then Begin
+        Print,' ***** Answer not understood - return to prompt'
+        goTo,setClass$
+      EndIf
+    EndIf
+  EndIf
+  xIntensity = xIntensity * 10.
+  xFlare = String(Fix(xIntensity),Format='(I2)')
+  ;
+  str_xRayFlare = String(xRayFlare,Format='(E8.1)')
+  str_totalFlux = String(totalFlux,Format='(E8.1)')
+  str_exponent  = String(strMid(str_totalFlux,5,3),Format='(I1)')
+  strPut,str_totalFlux,'0x ',5                     ;Clear exponent
+  strPut,str_totalFlux,str_exponent,6              ;Convert to 2-digit exponent (default is 3)
+  x14 = str_totalFlux                              ;Value
+;
+  strPut,lineOut, '31', 0                          ;Data code; always '31' for x-ray events
+  strPut,lineOut,'777', 2                          ;Station code; always '777' for GOES
+  strPut,lineOut,  x01, 5                          ;Year (A2)
+  strPut,lineOut,  x02, 7                          ;Month (A2)
+  strPut,lineOut,  x03, 9                          ;Day (A2)
+  strPut,lineOut, '  ', 11                         ;Unconfirmed change (TBD)
+  strPut,lineOut,  x05, 13                         ;Start hour (A2)
+  strPut,lineOut,  x06, 15                         ;Start minute (A2)
+  strPut,lineOut,  ' ', 17                         ;<space>
+  strPut,lineOut,  x09, 18                         ;End hour (A2)
+  strPut,lineOut,  x10, 20                         ;End minute (A2)
+  strPut,lineOut,  ' ', 22                         ;<space>
+  strPut,lineOut,  x07, 23                         ;Peak hour (A2)
+  strPut,lineOut,  x08, 25                         ;Peak minute (A2)
+  For iLoop=27,58 Do strPut,lineOut,' ',iLoop      ;Insert blank lines (32)
+  strPut,lineOut,xRayClass,59                      ;Flare classification (A1)
+  strPut,lineOut,   ' ',60                         ;<space>
+  strPut,lineOut,xFlare,61                         ;Flare intensity
+  strPut,lineOut,'    ',63                         ;<space>
+  strPut,lineOut,   x04,67                         ;Station name abbrevation
+  strPut,lineOut,  '  ',70                         ;<space>
+  strPut,lineOut,   x14,72                         ;Integrated flux
+  For iLoop=79,110 Do strPut,lineOut,' ',iLoop     ;Future effort - merge with flare file
+  Print,lineOut
+;
+;Blank spaces
+;
+;  strPut,lineOut,    ' ', 8                        ;blank*****
+;  strPut,lineOut,    ' ',13                        ;blank*****
+;  strPut,lineOut,    ' ',20                        ;blank*****
+;  strPut,lineOut,    ' ',24                        ;blank*****
+;  strPut,lineOut,    ' ',26                        ;blank*****
+;  strPut,lineOut,    ' ',42                        ;blank*****
+;  strPut,lineOut,    ' ',45                        ;blank*****
+;  strPut,lineOut,    ' ',52                        ;blank*****
+;  strPut,lineOut,    ' ',61                        ;blank*****
+;  strPut,lineOut,    ' ',70                        ;blank*****
+;  strPut,lineOut,    ' ',74                        ;blank*****
+  validRecordCounter  = validRecordCounter + 1
+;
+;Print record
+;
+  print,'OutF:     ',lineOut
+  printf,u_Out,lineOut
+nextRecord$:
+EndWhile
+;
+Close,u_dpd
+Close,u_out
+goTo,organizeJob$
+;
+fileError$:
+On_IOerror,null
+Print,' ***** Unexpected File error - terminating'
+Free_LUN,u_dpd
+Free_LUN,u_out
+goTo,endJob$
+;
+organizeJob$:
+Print,' Number of Valid Records:    ',validRecordCounter
+Print,' Number of Rejected Records: ',rejectRecordCounter
+Print,''
+;
+continueJob$:
+charAnswer=''
+;
+;Option to merge this x-ray flare listing with existing h-alpha flare listing
+;
+iOption$:
+iAnswer = ''
+read,prompt='*****Merge with h-alpha flare listing? (Y/N): ',iAnswer
+if strLen(iAnswer) EQ 0 Then goTo,endJob$
+iAnswer = strMid(iAnswer,0,1)
+if iAnswer EQ 'N' OR  iAnswer EQ 'n' Then goTo,endJob$
+if iAnswer NE 'Y' AND iAnswer NE 'y' Then Begin
+  print,'*****Unrecognized response - Try again'
+  goTo,iOption$
+endIf
+;
+xr_nRows  = file_Lines(printFileName)
+xr_Lines  = replicate('',xr_nRows)
+OpenR,xr_LUN,printFileName,/get_LUN
+ReadF,xr_LUN,xr_Lines
+Free_LUN,xr_LUN
+xr_Struct = {xr_strtTm: 0L, xr_stopTm: 0L, xr_peakTm: 0L}
+xr_Data   = replicate(xr_Struct,xr_nRows)
+for i=0,xr_nRows-1 do Begin
+  yy = fix(strMid(xr_Lines[i], 5,2)) + 2000
+  jOffset = julDay( 1, 1,yy, 0, 0, 0)            ;Offset for Start of Year
+;
+  mm = fix(strMid(xr_Lines[i], 7,2))             ;Month
+  dd = fix(strMid(xr_Lines[i], 9,2))             ;Day
+  ;
+  hr = fix(strMid(xr_Lines[i],13,2))             ;Flare start time
+  mn = fix(strMid(xr_Lines[i],15,2))
+  sc = 0
+  jDayNow = julDay(mm,dd,yy,hr,mn,sc)            ;Calculate julian day 
+  iSecond = long(86400*(jDayNow - jOffset))      ;Calculate seconds of year
+  xr_Data[i].xr_strtTm = iSecond                 ;Load value
+;  
+  hr = fix(strMid(xr_Lines[i],18,2))             ;Flare stop time
+  mn = fix(strMid(xr_Lines[i],20,2))
+  sc = 0
+  jDayNow = julDay(mm,dd,yy,hr,mn,sc)            ;Calculate julian day 
+  iSecond = long(86400*(jDayNow - jOffset))      ;Calculate seconds of year
+  xr_Data[i].xr_stopTm =  iSecond                ;Load value
+;
+  hr = fix(strMid(xr_Lines[i],23,2))             ;Flare peak time
+  mn = fix(strMid(xr_Lines[i],25,2))
+  sc = 0
+  jDayNow = julDay(mm,dd,yy,hr,mn,sc)            ;Calculate julian day 
+  iSecond = long(86400*(jDayNow - jOffset))      ;Calculate seconds of year
+  xr_Data[i].xr_peakTm = iSecond                 ;Load value
+endFor
+;
+;Read in hAlpha flare listings (valid after 1999)
+;
+;Get filename and open file
+;
+openHAlphaFile$:
+ha_FileName = ''
+On_IOerror,openHAlphaFileError$
+If !version.OS_Name EQ 'Microsoft Windows' Then Begin 
+  dataDirectory='C:\bdlatitude\Denig - Science\dmsp_sw\ngdc_sw\HalphaFlareReports'
+  ha_FileName = dialog_PickFile(title='Request H-Alpha FileName',  $
+    path=dataDirectory,filter = '*.txt',/read,                       $                                                  
+    get_Path = dataDirectory)
+EndIf Else Begin
+  Read,Prompt=' Enter input filename (<CR> to end): ',ha_FileName
+EndElse  
+If strLen(ha_FileName) EQ 0 Then goTo, endJob$
+Print,' Input File: ',ha_FileName
+ha_nRows  = file_Lines(ha_FileName)
+ha_Lines  = replicate('',ha_nRows)
+OpenR,ha_LUN,ha_FileName,/get_LUN
+ReadF,ha_LUN,ha_Lines
+Free_LUN,ha_LUN
+iAnswer = ''
+For i = 0,ha_nRows-1 do Begin
+  if strLen(ha_Lines[i]) NE 100 then Begin 
+    Read,Prompt=' ***** Unexpected h-alpha input line length. Enter new file (Y/N)? (<CR> to end): ',iAnswer
+    if strLen(iAnswer) EQ 0 then goTo,endJob$
+    iAnswer = strMid(iAnswer,0,1)
+    if iAnswer EQ 'Y' OR iAnswer EQ 'y' Then goTo,openHAlphaFile$
+    if iAnswer EQ 'N' OR iAnswer EQ 'n' Then goTo,endJob$
+    print,' ***** Unexpected answer - terminating'
+    goTo,endJob$
+  endIf  
+endFor      
+goTo,processFlare$
+;
+;Error handler (open)
+;
+openHAlphaFileError$:
+On_IOerror,null
+Free_LUN,u_dpd
+Print,' ***** File not found - Try again *****'
+goTo,openHAlphaFile$
+;
+processFlare$:
+ha_Struct = {ha_strtTm: 0L,ha_stopTm: 0L,ha_peakTm: 0L,ha_fLoc: '',ha_fReg: '',ha_fCMP: ''}
+ha_Data   = replicate(ha_Struct,ha_nRows)
+for i=0,ha_nRows-1 do Begin
+  yy = fix(strMid(ha_Lines[i], 5,2)) + 2000
+  jOffset = julDay( 1, 1,yy, 0, 0, 0)            ;Offset for Start of Year
+;  
+  mm = fix(strMid(ha_Lines[i], 7,2))             ;Month
+  dd = fix(strMid(ha_Lines[i], 9,2))             ;Day
+;
+  hr = fix(strMid(ha_Lines[i],13,2))             ;Flare start time
+  mn = fix(strMid(ha_Lines[i],15,2))
+  sc = 0
+  jDayNow = julDay(mm,dd,yy,hr,mn,sc)            ;Calculate julian day 
+  iSecond = long(86400*(jDayNow - jOffset))      ;Calculate seconds of year
+  ha_Data[i].ha_strtTm = iSecond                 ;Load value
+;  
+  hr = fix(strMid(ha_Lines[i],18,2))             ;Flare stop time
+  mn = fix(strMid(ha_Lines[i],20,2))
+  sc = 0
+  jDayNow = julDay(mm,dd,yy,hr,mn,sc)            ;Calculate julian day 
+  iSecond = long(86400*(jDayNow - jOffset))      ;Calculate seconds of year
+  ha_Data[i].ha_stopTm =  iSecond                ;Load value
+;
+  hr = fix(strMid(ha_Lines[i],23,2))             ;Flare peak time
+  mn = fix(strMid(ha_Lines[i],25,2))
+  sc = 0
+  jDayNow = julDay(mm,dd,yy,hr,mn,sc)            ;Calculate julian day 
+  iSecond = long(86400*(jDayNow - jOffset))      ;Calculate seconds of year
+  ha_Data[i].ha_peakTm = iSecond                 ;Load value
+;
+  ha_Data[i].ha_fLoc = strMid(ha_Lines[i],28,6)  ;Load location; eg. 'N25W01'
+  ha_Data[i].ha_fReg = strMid(ha_Lines[i],80,5)  ;Load NOAA/USAF region number; eg. '11640'
+  ha_Data[i].ha_fCMP = strMid(ha_Lines[i],86,8)  ;Load central mededian passage; eg.'130101.3'
+endFor
+;
+;Technique 1 - Cycle through each xr_peakTm to find closest associated ha_peakTm
+; Note: Technique 2 seems to work better
+;
+;diffVariable=LonArr(xr_nRows)
+;histo=intArr(25)
+;for i=0,24 do histo[i]=0
+;kntr1 = 0
+;For i=0,xr_nRows-1 do Begin
+;  tmDiffMin = abs(xr_Data[i].xr_peakTm - ha_Data[0].ha_peakTm)
+;  ha_Pointer=0
+;  For j=1,ha_nRows-1 do Begin
+;    tmDiffTst = abs(xr_Data[i].xr_peakTm - ha_Data[j].ha_peakTm)
+;    If tmDiffTst LT tmDiffMin then Begin
+;      tmDiffMin = tmDiffTst
+;      ha_Pointer= j
+;    endIf
+;  endFor
+;  For k=0,24 do Begin
+;    if tmDiffMin/60 GE k AND tmDiffMin/60 LT (k+1) then histo[k] = histo[k] + 1
+;  endFor  
+;  diffVariable[i] = tmDiffMin
+;  If tmDiffMin LT 600 then Begin
+;    kntr1 = kntr1 + 1
+;    print,i,ha_Pointer,xr_Data[i].xr_peakTm,ha_Data[ha_Pointer].ha_peakTm,tmDiffMin
+;    print,'x-ray:   ',xr_Lines[i]
+;    print,'H-alpha: ',ha_Lines[ha_Pointer]
+;    print,''
+;  endIf  
+;endFor
+;print,kntr1,' correlations out of ',xr_nRows,' Technique 1'
+;
+;Technique 2 - Cycle through each x-ray flare to see if there is an overlapping h-alpha flare
+;
+kntr2 = 0
+kntr_set = 0
+For i=0,xr_nRows-1 do Begin
+  For j=0,ha_nRows-1 do Begin                              ;Cycle through all h-alpha flares
+    If    (((ha_Data[j].ha_strtTm LE xr_Data[i].xr_strtTm)      $
+      AND   (ha_Data[j].ha_stopTm GE xr_Data[i].xr_strtTm))     $
+      OR   ((xr_Data[i].xr_strtTm LE ha_Data[j].ha_strtTm)      $
+      AND   (xr_Data[i].xr_stopTm GE ha_Data[j].ha_strtTm)))    $
+      Then Begin
+      kntr_set = 1                                         ;Correlation found - set marker
+      ha_Pointer = j                                       ;Save h-alpha flare pointer
+      xr_Pointer = i                                       ;Save x-ray flare pointer
+;      print,'H-alpha: ',ha_Lines[ha_pointer]               ;Print h-alpha information                         
+;      print,'X-ray:   ',xr_Lines[i]                        ;Print x-ray information
+    endIf    
+  endFor
+  If kntr_set EQ 1 Then Begin
+    kntr_set = 0                                           ;Reset marker
+    kntr2 = kntr2 + 1                                      ;Increment correlation counter
+    lnOut= xr_Lines[xr_Pointer]
+    strPut,lnOut,ha_Data[ha_Pointer].ha_fLoc,28            ;Load Region location
+    strPut,lnOut,ha_Data[ha_Pointer].ha_fReg,80            ;Load NOAA Region Number
+    strPut,lnOut,ha_Data[ha_Pointer].ha_fCMP,86            ;Load central meridian passage (CMP)
+    xr_Lines[xr_Pointer] = lnOut
+;    print,'updated: ',xr_Lines[xr_Pointer]
+;    print,'' 
+;    print,'Next Flare'
+  endIf
+endFor
+print,kntr2,' correlations out of ',xr_nRows,' Technique 2'
+;
+;Output final file
+;
+overWriteFile$:
+On_IOerror,overWriteFileError$
+Get_LUN,u_Over
+Openw,u_Over,printFileName
+For i=0,xr_Nrows-1 Do Begin
+  print,'Outf:     ',xr_Lines[i]
+  printf,u_Over,xr_Lines[i]
+endFor
+Close,u_Over
+Free_LUN,u_Over
+goTo,endJob$
+;
+overWriteFileError$:
+On_IOerror,null
+print,' ***** Unexpected file error - terminating'
+Free_LUN,u_Over
+;
+endJob$:
+Print,' End of Job'
+End
